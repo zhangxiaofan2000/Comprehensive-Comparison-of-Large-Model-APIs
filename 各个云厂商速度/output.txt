@@ -1,0 +1,1072 @@
+--- Content of ./src\backend\llm_client.py ---
+import os
+import json
+import time
+import requests
+from dotenv import load_dotenv
+from openai import OpenAI
+
+# 加载环境变量
+load_dotenv()
+
+class UnifiedLLMClient:
+    def __init__(self):
+        """统一的多厂商 LLM 客户端。"""
+        # 默认参数，天翼云也使用这些参数（可根据需要调整）
+        self.default_params = {
+            "temperature": 0.7,
+        }
+        self.provider_config = {
+            "深度求索": {
+                "client": self._init_openai_client,
+                "base_url": "https://api.deepseek.com",
+                "api_key_env": "DEEPSEEK_API_KEY",
+                "model": "deepseek-reasoner",
+                "default_params": {}
+            },
+            "阿里云": {
+                "client": self._init_openai_client,
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "api_key_env": "ALIYUN_API_KEY",
+                "model": "deepseek-r1",
+                "default_params": {}
+            },
+            "腾讯云": {
+                "client": self._init_openai_client,
+                "base_url": "https://api.lkeap.cloud.tencent.com/v1",
+                "api_key_env": "TENCENT_API_KEY",
+                "model": "deepseek-r1",
+                "default_params": {}
+            },
+            "火山引擎": {
+                "client": self._init_openai_client,
+                "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+                "api_key_env": "VOLC_API_KEY",
+                "model": os.getenv("VOLC_ENDPOINT_ID"),
+                "default_params": {}
+            },
+            "硅基流动": {
+                "client": self._init_openai_client,
+                "base_url": "https://api.siliconflow.cn/v1",
+                "api_key_env": "SILICONFLOW_API_KEY",
+                "model": "Pro/deepseek-ai/DeepSeek-R1",
+                "default_params": {}
+            },
+            "百度云": {
+                "client": self._init_openai_client,
+                "base_url": "https://qianfan.baidubce.com/v2",
+                "api_key_env": "BAIDU_API_KEY",
+                "model": "deepseek-r1",
+                "default_params": {}
+            },
+            "华为云": {
+                "api_key_env": "HUAWEI_API_KEY",
+                "url": "https://infer-modelarts-cn-southwest-2.modelarts-infer.com/v1/infers/c3cfa9e2-40c9-485f-a747-caae405296ef/v1/chat/completions",
+                "model": "DeepSeek-R1",
+                "default_params": {}
+            },
+            "潞晨云": {
+                "api_key_env": "LUCHEN_API_KEY",
+                "url": "https://cloud.luchentech.com/api/maas/chat/completions",
+                "model": "VIP/deepseek-ai/DeepSeek-R1",
+                "default_params": {}
+            },
+            # 新增：天翼云（DeepSeek-R1-昇腾版 / DeepSeekPyTorch）
+            "天翼云": {
+                "api_key_env": "TIANYI_API_KEY",  # 请确保环境变量中配置了正确的 App Key
+                "url": "https://wishub-x1.ctyun.cn/v1/chat/completions",
+                "model": "4bd107bff85941239e27b1509eccfe98",
+                "default_params": {}
+            }
+        }
+
+    def _init_openai_client(self, config):
+        return OpenAI(
+            api_key=os.getenv(config["api_key_env"]),
+            base_url=config["base_url"],
+            timeout=30
+        )
+
+    def _handle_streaming_response_openai(self, response, model):
+        for chunk in response:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            content = str(getattr(delta, "content", "") or "")
+            reasoning = str(getattr(delta, "reasoning_content", "") or "")
+            full_text = f"{reasoning}{content}"
+            json_obj = {
+                "id": "chatcmpl-simulated",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{
+                    "delta": {"content": full_text},
+                    "index": 0,
+                    "finish_reason": None
+                }]
+            }
+            yield json.dumps(json_obj)
+        finish_obj = {
+            "id": "chatcmpl-simulated",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{
+                "delta": {},
+                "index": 0,
+                "finish_reason": "stop"
+            }]
+        }
+        yield json.dumps(finish_obj)
+
+    def _handle_sse_streaming_response(self, provider, response, model):
+        if response.status_code != 200:
+            error_dict = {"error": {"message": f"请求失败({response.status_code}): {response.text}"}}
+            yield json.dumps(error_dict)
+            return
+        for line in response.iter_lines():
+            if not line:
+                continue
+            if line.startswith(b"data: "):
+                chunk = line[6:].strip().decode("utf-8")
+                if chunk == "[DONE]":
+                    finish_obj = {
+                        "id": "chatcmpl-simulated",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [{
+                            "delta": {},
+                            "index": 0,
+                            "finish_reason": "stop"
+                        }]
+                    }
+                    yield json.dumps(finish_obj)
+                    break
+                try:
+                    json_data = json.loads(chunk)
+                    result = {
+                        "id": "chatcmpl-simulated",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [{
+                            "delta": {},
+                            "index": 0,
+                            "finish_reason": None
+                        }]
+                    }
+                    delta = {}
+                    for choice in json_data.get("choices", []):
+                        delta.update(choice.get("delta", {}))
+                    if delta:
+                        result["choices"][0]["delta"] = delta
+                    yield json.dumps(result)
+                except json.JSONDecodeError:
+                    continue
+
+    def _handle_tianyi_streaming_response(self, provider, response, model):
+        if response.status_code != 200:
+            yield json.dumps({"error": {"message": f"请求失败({response.status_code}): {response.text}"}})
+            return
+
+        for line in response.iter_lines():
+            if not line:
+                continue
+
+            try:
+                line = line.decode('utf-8').strip()
+            except UnicodeDecodeError:
+                continue
+
+            if line.startswith('data:'):
+                line = line[5:].strip()
+
+            if line == '[DONE]':
+                finish_obj = {
+                    "id": "chatcmpl-simulated",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [{
+                        "delta": {},
+                        "index": 0,
+                        "finish_reason": "stop"
+                    }]
+                }
+                yield json.dumps(finish_obj)
+                break
+
+            try:
+                # 处理可能出现的多个 JSON 合并情况
+                json_objects = line.replace('}{', '}\n{').splitlines()
+                for json_str in json_objects:
+                    data = json.loads(json_str)
+                    content = data.get('choices', [{}])[0].get('delta', {}).get('content', '')
+                    if content:
+                        chunk_obj = {
+                            "id": "chatcmpl-simulated",
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": model,
+                            "choices": [{
+                                "delta": {"content": content},
+                                "index": 0,
+                                "finish_reason": None
+                            }]
+                        }
+                        yield json.dumps(chunk_obj)
+            except Exception as e:
+                yield json.dumps({"error": {"message": f"[解析错误: {str(e)}]"}})
+
+    def stream_chat(self, provider, messages):
+        if provider not in self.provider_config:
+            raise ValueError(f"不支持的厂商：{provider}")
+        config = self.provider_config[provider]
+        # 合并默认参数
+        params = {**self.default_params, **config.get("default_params", {})}
+        model = config["model"]
+        try:
+            if "client" in config:
+                return self.stream_chat_openai(provider, messages, params, model)
+            else:
+                return self.stream_chat_http(provider, messages, params, model)
+        except Exception as e:
+            def error_gen():
+                error_dict = {"error": {"message": f"{provider} API错误：{str(e)}"}}
+                yield json.dumps(error_dict)
+            return error_gen()
+
+    def stream_chat_openai(self, provider, messages, params, model):
+        config = self.provider_config[provider]
+        try:
+            client = config["client"](config)
+            req_params = {
+                "model": model,
+                "messages": messages,
+                "stream": True,
+                **params
+            }
+            stream = client.chat.completions.create(**req_params)
+            return self._handle_streaming_response_openai(stream, model)
+        except Exception as e:
+            def error_gen():
+                error_dict = {"error": {"message": f"{provider} API错误：{str(e)}"}}
+                yield json.dumps(error_dict)
+            return error_gen()
+
+    def stream_chat_http(self, provider, messages, params, model):
+        config = self.provider_config[provider]
+        try:
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {os.getenv(config['api_key_env'])}"
+            }
+            payload = {
+                "model": model,
+                "messages": messages,
+                "stream": True,
+            }
+            if provider == "华为云":
+                payload["stream_options"] = {"include_usage": True}
+                response = requests.post(
+                    config["url"],
+                    headers=headers,
+                    json=payload,
+                    stream=True,
+                    verify=False,
+                    timeout=30
+                )
+            else:
+                response = requests.post(
+                    config["url"],
+                    headers=headers,
+                    json=payload,
+                    stream=True,
+                    timeout=30
+                )
+            # 针对天翼云使用专用处理函数
+            if provider == "天翼云":
+                return self._handle_tianyi_streaming_response(provider, response, model)
+            else:
+                return self._handle_sse_streaming_response(provider, response, model)
+        except Exception as e:
+            def error_gen():
+                error_dict = {"error": {"message": f"{provider} API错误：{str(e)}"}}
+                yield json.dumps(error_dict)
+            return error_gen()
+
+if __name__ == "__main__":
+    llm = UnifiedLLMClient()
+    test_message = "简单介绍你自己"
+    # 这里仅测试天翼云，可根据需要修改 provider 列表
+    # providers = ["深度求索", "阿里云", "腾讯云", "火山引擎", "硅基流动", "华为云", "百度云", "潞晨云", "天翼云"]
+
+    providers = ["天翼云"]
+    for provider in providers:
+        print(f"\n=== {provider.upper()} 测试 ===")
+        try:
+            for chunk in llm.stream_chat(provider, [{"role": "user", "content": test_message}]):
+                print(chunk, end="", flush=True)
+            print("\n" + "-" * 80)
+        except Exception as e:
+            print(f"错误：{str(e)}")
+
+
+--- Content of ./src\backend\main.py ---
+import os
+import json
+import asyncio
+import threading
+import time
+from fastapi import FastAPI, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from fastapi.responses import FileResponse
+from llm_client import UnifiedLLMClient
+from queue import Queue, Empty
+
+app = FastAPI()
+
+# 挂载静态文件目录
+app.mount("/static", StaticFiles(directory="../frontend/static"), name="static")
+
+# 跨域设置
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/")
+def serve_index():
+    index_path = os.path.join(os.path.dirname(__file__), "../frontend/index.html")
+    return FileResponse(index_path)
+
+
+class CompetitionConfig(BaseModel):
+    questions: list = [
+        "回答答案1+1=",
+        # 如需更多题目，可在此添加
+    ]
+    providers: list = [
+        "深度求索", "阿里云", "腾讯云", "火山引擎",
+        "硅基流动", "华为云", "百度云", "潞晨云", "天翼云"
+    ]
+    max_retries: int = 3
+
+
+class ProviderStatus:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        # 每道题记录：开始时间、完成时间、首 token 时间、以及 tokens 数量
+        self.start_time = [None] * 5
+        self.complete_time = [None] * 5
+        self.first_token = [None] * 5
+        self.tokens = [{"completion": 0} for _ in range(5)]
+        self.retries = [0] * 5
+        self.errors = []  # 记录每题的错误信息
+
+
+class CompetitionState:
+    def __init__(self, config: CompetitionConfig):
+        self.config = config
+        self.status = {p: ProviderStatus() for p in config.providers}
+
+    def reset_all(self):
+        for p in self.config.providers:
+            self.status[p].reset()
+
+
+config = CompetitionConfig()
+state = CompetitionState(config)
+llm = UnifiedLLMClient()
+
+
+@app.post("/start")
+def start_competition():
+    state.reset_all()
+    return {"status": "ready"}
+
+
+@app.get("/status")
+def get_status():
+    return {p: s.__dict__ for p, s in state.status.items()}
+
+
+@app.get("/questions")
+def get_questions():
+    return config.questions
+
+
+# 辅助函数：从队列中读取数据，超时返回 "TIMEOUT"
+def get_chunk_from_queue(q):
+    try:
+        return q.get(timeout=10)
+    except Empty:
+        return "TIMEOUT"
+
+
+@app.websocket("/ws/{provider}/{q_index}")
+async def websocket_endpoint(websocket: WebSocket, provider: str, q_index: int):
+    await websocket.accept()
+    if provider not in config.providers or q_index >= len(config.questions):
+        await websocket.send_text(json.dumps({"error": {"message": "Invalid request"}}))
+        await websocket.close()
+        return
+
+    # 取当前题目内容
+    question = config.questions[q_index]
+    messages = [{"role": "user", "content": question}]
+    p_status = state.status[provider]
+
+    # 【关键修改】提前记录开始时间：在调用外部 API 前记录
+    p_status.start_time[q_index] = time.perf_counter()
+
+    # 调用多厂商 API 得到一个阻塞生成器
+    stream = llm.stream_chat(provider, messages)
+    first_token_sent = False
+
+    # 使用队列配合后台线程异步读取生成器数据
+    q = Queue()
+
+    def reader_thread():
+        for chunk in stream:
+            q.put(chunk)
+        q.put(None)  # 标记生成器结束
+
+    threading.Thread(target=reader_thread, daemon=True).start()
+
+    while True:
+        chunk = await asyncio.to_thread(get_chunk_from_queue, q)
+        if chunk == "TIMEOUT":
+            error_message = "超时未收到输出"
+            error_data = {"error": {"message": error_message}}
+            await websocket.send_text(json.dumps(error_data))
+            p_status.errors.append(f"Question {q_index}: {error_message}")
+            break
+        if chunk is None:
+            break
+
+        try:
+            data = json.loads(chunk)
+        except Exception as e:
+            data = {"error": {"message": str(e)}}
+
+        if "error" in data:
+            p_status.errors.append(f"Question {q_index}: {data['error']['message']}")
+            await websocket.send_text(chunk)
+            break
+
+        # 记录首次收到 token 的时延（单位：秒，前端可乘以 1000 展示为毫秒）
+        if not first_token_sent and "choices" in data:
+            delta = data["choices"][0].get("delta", {})
+            if delta.get("content"):
+                first_token_sent = True
+                p_status.first_token[q_index] = time.perf_counter() - p_status.start_time[q_index]
+
+        # 统计 tokens 总量，这里直接以字符数计（如需其它算法，可做调整）
+        if "choices" in data:
+            delta = data["choices"][0].get("delta", {})
+            content = delta.get("content", "")
+            if content:
+                p_status.tokens[q_index]["completion"] += len(content)
+
+        await websocket.send_text(chunk)
+
+        # 当收到 finish_reason 表明当前题结束
+        if "choices" in data and data["choices"][0].get("finish_reason"):
+            p_status.complete_time[q_index] = time.perf_counter() - p_status.start_time[q_index]
+            break
+
+    await websocket.close()
+
+
+@app.get("/final_ranking")
+def final_ranking():
+    rankings = []
+    for provider, status in state.status.items():
+        # 计算所有题目的总耗时（秒）
+        complete_times = [t for t in status.complete_time if t is not None]
+        total_time = sum(complete_times) if complete_times else 0
+        # 取所有题目中最小的首 token 时间
+        first_tokens = [t for t in status.first_token if t is not None]
+        first_token = min(first_tokens) if first_tokens else None
+        # 统计所有题的 tokens 数量（按字符数统计）
+        total_tokens = sum(token["completion"] for token in status.tokens)
+        avg_tokens_per_second = total_tokens / total_time if total_time > 0 else 0
+
+        total_calls = len([t for t in status.start_time if t is not None])
+        answered_count = len([t for t in status.complete_time if t is not None])
+
+        rankings.append({
+            "provider": provider,
+            "firstToken": first_token,  # 单位：秒；前端展示时乘以1000转换为毫秒
+            "avgTokensPerSecond": round(avg_tokens_per_second, 2) if total_time > 0 else '-',
+            "totalTime": total_time,
+            "totalTokens": total_tokens,
+            "totalCalls": total_calls,
+            "answeredCount": answered_count
+        })
+
+    # 按照总耗时从低到高排序（耗时少的排名靠前）
+    rankings.sort(key=lambda x: x["totalTime"] if x["totalTime"] else float('inf'))
+    return {"rankings": rankings}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8000)
+
+
+--- Content of ./src\backend\test.py ---
+# simultaneous_requests.py
+import threading
+import time
+from llm_client import UnifiedLLMClient
+
+def request_provider(provider, question):
+    client = UnifiedLLMClient()
+    print(f"【{provider}】 请求开始...")
+    try:
+        # 调用流式接口
+        stream = client.stream_chat(provider, [{"role": "user", "content": question}])
+        for chunk in stream:
+            # 每个 chunk 前面打印对应的厂商标识
+            print(f"[{provider}] {chunk}")
+    except Exception as e:
+        print(f"[{provider}] 错误: {e}")
+    print(f"【{provider}】 请求结束.")
+
+if __name__ == "__main__":
+    providers = ["deepseek", "aliyun", "tencent", "volcano", "siliconflow", "huawei", "baidu", "luchen"]
+    question = "请用三句话介绍你自己"
+
+    threads = []
+    for p in providers:
+        t = threading.Thread(target=request_provider, args=(p, question))
+        threads.append(t)
+        t.start()
+
+    # 等待所有线程结束
+    for t in threads:
+        t.join()
+
+    print("所有请求结束。")
+
+
+--- Content of ./src\frontend\index.html ---
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM性能竞赛</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    /* 内嵌样式：调整对话气泡和打字机效果 */
+    .chat-container {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 8px;
+      overflow-y: auto;
+      height: 300px; /* 根据需要调整高度 */
+    }
+    .chat-bubble {
+      max-width: 80%;
+      padding: 8px 12px;
+      border-radius: 16px;
+      word-break: break-word;
+      font-size: 14px;
+    }
+    .chat-bubble.user {
+      background-color: #e6f7ff;
+      align-self: flex-start;
+    }
+    .chat-bubble.model {
+      background-color: #f6ffed;
+      align-self: flex-end;
+    }
+    .typewriter {
+      white-space: normal;
+    }
+    /* 新增错误状态的圆圈样式 */
+    .dot.error {
+      background: var(--error-color);
+      border-color: var(--error-color);
+      color: white;
+      animation: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="dashboard">
+      <header>
+          <h1><i class="fas fa-rocket"></i> DeepSeek-R1 API性能竞赛</h1>
+          <div class="controls">
+              <button class="btn-primary" onclick="startCompetition()">开始测试</button>
+              <!-- 新增：最终排名按钮 -->
+              <button class="btn-primary" onclick="showFinalRanking()">显示最终排名</button>
+          </div>
+      </header>
+      <div class="grid-container" id="grid"></div>
+      <!-- 最终排名模态框 -->
+      <!-- 修改后的最终排名模态框 -->
+<div id="rankingModal" class="modal">
+  <div class="modal-content">
+    <span class="close" onclick="closeRanking()">&times;</span>
+    <h2><i class="fas fa-ranking-star"></i> 最终排名</h2>
+    <table class="ranking-table">
+      <thead>
+  <tr>
+    <th>厂商</th>
+    <th>首Token时间 (ms)</th>
+    <th>平均每秒输出 tokens</th>
+    <th>总耗时 (s)</th>
+    <th>调用tokens总量</th>
+    <th>回答问题个数</th>
+  </tr>
+</thead>
+
+      <tbody id="rankingBody"></tbody>
+    </table>
+  </div>
+</div>
+
+  </div>
+  <script>
+      // 仅定义厂商信息，问题列表由后端获取
+      const providers = [
+    { id: '深度求索',    name: '深度求索',      logo: 'logo_deepseek.png' },
+    { id: '阿里云',      name: '阿里云',        logo: 'logo_aliyun.png' },
+    { id: '腾讯云',      name: '腾讯云',        logo: 'logo_tencent.png' },
+    { id: '百度云',      name: '百度云',        logo: 'logo_baidu.png' },
+    { id: '华为云',      name: '华为云',        logo: 'logo_huawei.png' },
+    { id: '火山引擎',    name: '火山引擎',      logo: 'logo_volcano.png' },
+    { id: '硅基流动',   name: '硅基流动(PRO)',      logo: 'logo_siliconflow.png' },
+    { id: '潞晨云',      name: '潞晨云（VIP）',        logo: 'logo_luchen.png' },
+    { id: '天翼云',      name: '天翼云',        logo: 'logo_tianyiyun.png' }  // 新增卡片
+];
+
+      // 全局问题列表（由后端获取）
+      let questions = [];
+
+      // 生成卡片
+      function initDashboard() {
+          const grid = document.getElementById('grid');
+          providers.forEach(p => {
+              grid.appendChild(createProviderCard(p));
+          });
+      }
+
+      function createProviderCard(provider) {
+          const card = document.createElement('div');
+          card.className = 'provider-card';
+          card.id = `${provider.id}-card`;
+          card.innerHTML = `
+              <div class="header">
+                  <img src="/static/logos/${provider.logo}" alt="${provider.name}">
+                  <h3 style="white-space: nowrap;">${provider.name}</h3>
+                  <div class="status-dots">
+                      ${Array.from({length: 5}, (_, i) => `
+                          <div class="dot" id="${provider.id}-dot-${i}">
+                              ${i+1}
+                              <div class="time-label"></div>
+                          </div>
+                      `).join('')}
+                  </div>
+              </div>
+              <div class="chat-container" id="${provider.id}-chat"></div>
+          `;
+          return card;
+      }
+
+      // 开始测试：先调用 /start 后，再从 /questions 获取问题列表，然后同时启动所有厂商的第一题
+      function startCompetition() {
+            Promise.all([
+                fetch('/start', { method: 'POST' }),
+                fetch('/questions')
+            ])
+            .then(([startRes, questionsRes]) => questionsRes.json())
+            .then(qs => {
+                 questions = qs;
+                 // 直接同时启动各个厂商的第一题，不必使用 setTimeout(…, 0)
+                 providers.forEach(provider => {
+                      startProviderConversation(provider.id, 0);
+                 });
+            })
+            .catch(error => console.error('启动失败:', error));
+        }
+
+
+      // 单个厂商对话流程：完成当前题后启动下一题（独立进行）
+      function startProviderConversation(providerId, qIndex) {
+          if (qIndex >= questions.length) return;
+          const chat = document.getElementById(`${providerId}-chat`);
+          // 显示用户预设问题
+          appendChatBubble(chat, questions[qIndex], 'user');
+          // 创建模型回复气泡
+          const modelBubble = document.createElement('div');
+          modelBubble.classList.add('chat-bubble', 'model');
+          const span = document.createElement('span');
+          span.classList.add('typewriter');
+          span.textContent = "";
+          modelBubble.dataset.fullText = "";
+          modelBubble.appendChild(span);
+          chat.appendChild(modelBubble);
+          chat.scrollTop = chat.scrollHeight;
+          // 建立 WebSocket 连接获取当前问题的回复
+          const wsUrl = `ws://${window.location.host}/ws/${providerId}/${qIndex}`;
+          const socket = new WebSocket(wsUrl);
+          socket.onopen = function() {
+              console.log("WebSocket connected:", wsUrl);
+          };
+          socket.onmessage = function(event) {
+              try {
+                  const data = JSON.parse(event.data);
+                  if (data.error) {
+                      showError(chat, data.error.message);
+                      markQuestionError(providerId, qIndex);
+                      socket.close();
+                      // 错误后自动跳到下一题
+                      startProviderConversation(providerId, qIndex + 1);
+                      return;
+                  }
+                  if (data.choices && data.choices[0]) {
+                      const delta = data.choices[0].delta;
+                      if (delta.content) {
+                          updateModelBubble(span, delta.content);
+                      }
+                      if (data.choices[0].finish_reason) {
+                          markQuestionComplete(providerId, qIndex);
+                          socket.close();
+                          // 当前厂商完成当前题后启动下一题
+                          startProviderConversation(providerId, qIndex + 1);
+                      }
+                  }
+              } catch (err) {
+                  console.error("WebSocket JSON parse error:", err);
+              }
+          };
+          socket.onerror = function(event) {
+              console.error("WebSocket error:", event);
+              socket.close();
+          };
+      }
+
+      // 添加对话气泡（用户问题）
+      function appendChatBubble(container, text, type) {
+          const bubble = document.createElement('div');
+          bubble.classList.add('chat-bubble', type);
+          const span = document.createElement('span');
+          span.classList.add('typewriter');
+          span.textContent = text;
+          bubble.appendChild(span);
+          container.appendChild(bubble);
+          container.scrollTop = container.scrollHeight;
+      }
+
+      // 模型回复更新：打字机效果，自动滚动到底部
+      async function updateModelBubble(span, newChunk) {
+          let currentText = span.dataset.fullText || "";
+          const updatedText = currentText + newChunk;
+          span.dataset.fullText = updatedText;
+          let i = currentText.length;
+          while (i < updatedText.length) {
+              span.textContent = updatedText.substring(0, i + 1);
+              i++;
+              const chatContainer = span.parentElement.parentElement;
+              chatContainer.scrollTop = chatContainer.scrollHeight;
+              await new Promise(resolve => setTimeout(resolve, 30));
+          }
+      }
+
+      // 标记完成状态（绿色圆圈）
+      function markQuestionComplete(providerId, qIndex) {
+          const dot = document.getElementById(`${providerId}-dot-${qIndex}`);
+          dot.classList.add('completed');
+      }
+
+      // 新增：标记错误状态（红色圆圈）
+      function markQuestionError(providerId, qIndex) {
+          const dot = document.getElementById(`${providerId}-dot-${qIndex}`);
+          dot.classList.remove('completed');
+          dot.classList.add('error');
+      }
+
+      function showError(container, message) {
+          const errorDiv = document.createElement('div');
+          errorDiv.style.color = 'red';
+          errorDiv.textContent = `Error: ${message}`;
+          container.appendChild(errorDiv);
+      }
+
+      // 最终排名展示函数（测试结束后调用）
+      function showFinalRanking() {
+          fetch('/final_ranking')
+              .then(res => res.json())
+              .then(data => {
+                  updateRankingTable(data.rankings);
+                  document.getElementById('rankingModal').style.display = 'block';
+              })
+              .catch(err => console.error('获取最终排名失败:', err));
+      }
+
+function updateRankingTable(rankings) {
+    const tbody = document.getElementById('rankingBody');
+    tbody.innerHTML = rankings.map(r => {
+      return `<tr>
+        <td>${r.provider}</td>
+        <td>${r.firstToken ? (r.firstToken * 1000).toFixed(2) : '-'}</td>
+        <td>${r.avgTokensPerSecond}</td>
+        <td>${r.totalTime.toFixed(2)}</td>
+        <td>${r.totalTokens}</td>  <!-- 改这里 -->
+        <td>${r.answeredCount}</td>
+      </tr>`;
+    }).join('');
+}
+
+
+      function closeRanking() {
+          document.getElementById('rankingModal').style.display = 'none';
+      }
+
+      window.onload = initDashboard;
+  </script>
+
+</body>
+</html>
+
+
+--- Content of ./src\frontend\static\css\style.css ---
+/* 全局变量 */
+:root {
+  --primary-color: #4A90E2;
+  --success-color: #7ED321;
+  --error-color: #D0021B;
+  --text-color: #2C3E50;
+}
+
+/* 重置及基础样式 */
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-size: 16px; /* 调大基础字体大小，适合移动端展示 */
+}
+
+body {
+  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  background: #F5F7FA;
+  padding: 20px;
+}
+
+/* 整体仪表盘，垂直布局，占满整个视口 */
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* header 固定高度 */
+header {
+  flex: 0 0 auto;
+  text-align: center;
+  margin-bottom: 15px;
+}
+
+/* 控制按钮区域 */
+.controls {
+  display: flex;
+  gap: 15px;
+  justify-content: center;
+  margin-bottom: 15px;
+}
+
+/* 网格容器：4列2行，固定卡片大小 */
+/*.grid-container {*/
+/*  flex: 1;*/
+/*  display: grid;*/
+/*  grid-template-columns: repeat(3, 1fr);  !* 修改为 3 列 *!*/
+/*  gap: 20px;*/
+/*  margin: 0 auto;*/
+/*  overflow: hidden;*/
+/*}*/
+.grid-container {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(3, 500px); /* 每列固定 300px 宽 */
+  gap: 20px;
+  justify-content: center; /* 居中整个网格 */
+  margin: 0 auto;
+  overflow: hidden;
+}
+
+
+/* 每个厂商卡片 */
+.provider-card {
+  background: white;
+  border-radius: 12px;
+  padding: 15px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;  /* 超出部分隐藏 */
+}
+
+/* 卡片头部 */
+.provider-card .header {
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.provider-card .header img {
+  width: 50px;
+  height: 50px;
+  object-fit: contain;
+  border-radius: 8px;
+}
+
+/* 状态点区域及动画 */
+.status-dots {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+.dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #F8F9FA;
+  border: 2px solid #DEE2E6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: #6C757D;
+  transition: all 0.3s;
+  position: relative;
+}
+
+/* 完成状态：绿色 */
+.dot.completed {
+  background: var(--success-color);
+  border-color: #64C132;
+  color: white;
+  animation: bounce 0.5s ease-out;
+}
+
+/* 错误状态：红色 */
+.dot.error {
+  background: var(--error-color);
+  border-color: var(--error-color);
+  color: white;
+  animation: none;
+}
+
+/* 弹跳动画效果 */
+@keyframes bounce {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.2);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* 聊天区域：占据卡片剩余空间，内容多时出现滚动条 */
+.chat-container {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border-top: 1px solid #DDD;
+  padding-top: 10px;
+}
+
+/* 对话气泡样式 */
+.chat-bubble {
+  max-width: 80%;
+  padding: 8px 12px;
+  border-radius: 16px;
+  word-break: break-word;
+  font-size: 16px; /* 调大对话气泡内文字 */
+}
+.chat-bubble.user {
+  background-color: #e6f7ff;
+  align-self: flex-start;
+}
+.chat-bubble.model {
+  background-color: #f6ffed;
+  align-self: flex-end;
+}
+
+/* Modal 样式 */
+.modal {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0,0,0,0.5);
+  backdrop-filter: blur(3px);
+}
+.modal-content {
+  background: white;
+  width: 100%;
+  height: 100%;
+  padding: 25px;
+  border-radius: 0; /* 取消圆角 */
+  position: relative;
+  overflow-y: auto;
+  font-size: 20px; /* 模态框内文字调大 */
+  line-height: 1.5;
+}
+
+/* 排名表格样式 */
+.ranking-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0 10px; /* 增加行间距 */
+  margin-top: 20px;
+}
+.ranking-table th, .ranking-table td {
+  font-size: 22px; /* 增大表格字体 */
+  padding: 16px;
+}
+th {
+  background: var(--primary-color);
+  color: white;
+  text-align: left;
+}
+td {
+  border-bottom: 1px solid #EEE;
+}
+
+/* 响应式适配 */
+@media (max-width: 768px) {
+  .grid-container {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .modal-content {
+    width: 100%;
+    height: 100%;
+  }
+}
+
+

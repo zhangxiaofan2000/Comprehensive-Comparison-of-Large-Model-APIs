@@ -1,0 +1,219 @@
+/* 全局变量 */
+:root {
+  --primary-color: #4A90E2;
+  --success-color: #7ED321;
+  --error-color: #D0021B;
+  --text-color: #2C3E50;
+}
+
+/* 重置及基础样式 */
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-size: 16px; /* 调大基础字体大小，适合移动端展示 */
+}
+
+body {
+  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  background: #F5F7FA;
+  padding: 20px;
+}
+
+/* 整体仪表盘，垂直布局，占满整个视口 */
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* header 固定高度 */
+header {
+  flex: 0 0 auto;
+  text-align: center;
+  margin-bottom: 15px;
+}
+
+/* 控制按钮区域 */
+.controls {
+  display: flex;
+  gap: 15px;
+  justify-content: center;
+  margin-bottom: 15px;
+}
+
+/* 网格容器：4列2行，固定卡片大小 */
+/*.grid-container {*/
+/*  flex: 1;*/
+/*  display: grid;*/
+/*  grid-template-columns: repeat(3, 1fr);  !* 修改为 3 列 *!*/
+/*  gap: 20px;*/
+/*  margin: 0 auto;*/
+/*  overflow: hidden;*/
+/*}*/
+.grid-container {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(3, 500px); /* 每列固定 300px 宽 */
+  gap: 20px;
+  justify-content: center; /* 居中整个网格 */
+  margin: 0 auto;
+  overflow: hidden;
+}
+
+
+/* 每个厂商卡片 */
+.provider-card {
+  background: white;
+  border-radius: 12px;
+  padding: 15px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;  /* 超出部分隐藏 */
+}
+
+/* 卡片头部 */
+.provider-card .header {
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.provider-card .header img {
+  width: 50px;
+  height: 50px;
+  object-fit: contain;
+  border-radius: 8px;
+}
+
+/* 状态点区域及动画 */
+.status-dots {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+.dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #F8F9FA;
+  border: 2px solid #DEE2E6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: #6C757D;
+  transition: all 0.3s;
+  position: relative;
+}
+
+/* 完成状态：绿色 */
+.dot.completed {
+  background: var(--success-color);
+  border-color: #64C132;
+  color: white;
+  animation: bounce 0.5s ease-out;
+}
+
+/* 错误状态：红色 */
+.dot.error {
+  background: var(--error-color);
+  border-color: var(--error-color);
+  color: white;
+  animation: none;
+}
+
+/* 弹跳动画效果 */
+@keyframes bounce {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.2);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* 聊天区域：占据卡片剩余空间，内容多时出现滚动条 */
+.chat-container {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border-top: 1px solid #DDD;
+  padding-top: 10px;
+}
+
+/* 对话气泡样式 */
+.chat-bubble {
+  max-width: 80%;
+  padding: 8px 12px;
+  border-radius: 16px;
+  word-break: break-word;
+  font-size: 16px; /* 调大对话气泡内文字 */
+}
+.chat-bubble.user {
+  background-color: #e6f7ff;
+  align-self: flex-start;
+}
+.chat-bubble.model {
+  background-color: #f6ffed;
+  align-self: flex-end;
+}
+
+/* Modal 样式 */
+.modal {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0,0,0,0.5);
+  backdrop-filter: blur(3px);
+}
+.modal-content {
+  background: white;
+  width: 100%;
+  height: 100%;
+  padding: 25px;
+  border-radius: 0; /* 取消圆角 */
+  position: relative;
+  overflow-y: auto;
+  font-size: 20px; /* 模态框内文字调大 */
+  line-height: 1.5;
+}
+
+/* 排名表格样式 */
+.ranking-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0 10px; /* 增加行间距 */
+  margin-top: 20px;
+}
+.ranking-table th, .ranking-table td {
+  font-size: 22px; /* 增大表格字体 */
+  padding: 16px;
+}
+th {
+  background: var(--primary-color);
+  color: white;
+  text-align: left;
+}
+td {
+  border-bottom: 1px solid #EEE;
+}
+
+/* 响应式适配 */
+@media (max-width: 768px) {
+  .grid-container {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .modal-content {
+    width: 100%;
+    height: 100%;
+  }
+}

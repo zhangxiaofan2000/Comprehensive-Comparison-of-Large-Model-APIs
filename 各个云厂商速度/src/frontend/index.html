@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM性能竞赛</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    /* 内嵌样式：调整对话气泡和打字机效果 */
+    .chat-container {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 8px;
+      overflow-y: auto;
+      height: 300px; /* 根据需要调整高度 */
+    }
+    .chat-bubble {
+      max-width: 80%;
+      padding: 8px 12px;
+      border-radius: 16px;
+      word-break: break-word;
+      font-size: 14px;
+    }
+    .chat-bubble.user {
+      background-color: #e6f7ff;
+      align-self: flex-start;
+    }
+    .chat-bubble.model {
+      background-color: #f6ffed;
+      align-self: flex-end;
+    }
+    .typewriter {
+      white-space: normal;
+    }
+    /* 新增错误状态的圆圈样式 */
+    .dot.error {
+      background: var(--error-color);
+      border-color: var(--error-color);
+      color: white;
+      animation: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="dashboard">
+      <header>
+          <h1><i class="fas fa-rocket"></i> DeepSeek-R1 API性能竞赛</h1>
+          <div class="controls">
+              <button class="btn-primary" onclick="startCompetition()">开始测试</button>
+              <!-- 新增：最终排名按钮 -->
+              <button class="btn-primary" onclick="showFinalRanking()">显示最终排名</button>
+          </div>
+      </header>
+      <div class="grid-container" id="grid"></div>
+      <!-- 最终排名模态框 -->
+      <!-- 修改后的最终排名模态框 -->
+<div id="rankingModal" class="modal">
+  <div class="modal-content">
+    <span class="close" onclick="closeRanking()">&times;</span>
+    <h2><i class="fas fa-ranking-star"></i> 最终排名</h2>
+    <table class="ranking-table">
+      <thead>
+  <tr>
+    <th>厂商</th>
+    <th>首Token时间 (ms)</th>
+    <th>平均每秒输出 tokens</th>
+    <th>总耗时 (s)</th>
+    <th>调用tokens总量</th>
+    <th>回答问题个数</th>
+  </tr>
+</thead>
+
+      <tbody id="rankingBody"></tbody>
+    </table>
+  </div>
+</div>
+
+  </div>
+  <script>
+      // 仅定义厂商信息，问题列表由后端获取
+      const providers = [
+    { id: '深度求索',    name: '深度求索',      logo: 'logo_deepseek.png' },
+    { id: '阿里云',      name: '阿里云',        logo: 'logo_aliyun.png' },
+    { id: '腾讯云',      name: '腾讯云',        logo: 'logo_tencent.png' },
+    { id: '百度云',      name: '百度云',        logo: 'logo_baidu.png' },
+    { id: '华为云',      name: '华为云',        logo: 'logo_huawei.png' },
+    { id: '火山引擎',    name: '火山引擎',      logo: 'logo_volcano.png' },
+    { id: '硅基流动',   name: '硅基流动(PRO)',      logo: 'logo_siliconflow.png' },
+    { id: '潞晨云',      name: '潞晨云（VIP）',        logo: 'logo_luchen.png' },
+    { id: '天翼云',      name: '天翼云',        logo: 'logo_tianyiyun.png' }  // 新增卡片
+];
+
+      // 全局问题列表（由后端获取）
+      let questions = [];
+
+      // 生成卡片
+      function initDashboard() {
+          const grid = document.getElementById('grid');
+          providers.forEach(p => {
+              grid.appendChild(createProviderCard(p));
+          });
+      }
+
+      function createProviderCard(provider) {
+          const card = document.createElement('div');
+          card.className = 'provider-card';
+          card.id = `${provider.id}-card`;
+          card.innerHTML = `
+              <div class="header">
+                  <img src="/static/logos/${provider.logo}" alt="${provider.name}">
+                  <h3 style="white-space: nowrap;">${provider.name}</h3>
+                  <div class="status-dots">
+                      ${Array.from({length: 5}, (_, i) => `
+                          <div class="dot" id="${provider.id}-dot-${i}">
+                              ${i+1}
+                              <div class="time-label"></div>
+                          </div>
+                      `).join('')}
+                  </div>
+              </div>
+              <div class="chat-container" id="${provider.id}-chat"></div>
+          `;
+          return card;
+      }
+
+      // 开始测试：先调用 /start 后，再从 /questions 获取问题列表，然后同时启动所有厂商的第一题
+      function startCompetition() {
+            Promise.all([
+                fetch('/start', { method: 'POST' }),
+                fetch('/questions')
+            ])
+            .then(([startRes, questionsRes]) => questionsRes.json())
+            .then(qs => {
+                 questions = qs;
+                 // 直接同时启动各个厂商的第一题，不必使用 setTimeout(…, 0)
+                 providers.forEach(provider => {
+                      startProviderConversation(provider.id, 0);
+                 });
+            })
+            .catch(error => console.error('启动失败:', error));
+        }
+
+
+      // 单个厂商对话流程：完成当前题后启动下一题（独立进行）
+      function startProviderConversation(providerId, qIndex) {
+          if (qIndex >= questions.length) return;
+          const chat = document.getElementById(`${providerId}-chat`);
+          // 显示用户预设问题
+          appendChatBubble(chat, questions[qIndex], 'user');
+          // 创建模型回复气泡
+          const modelBubble = document.createElement('div');
+          modelBubble.classList.add('chat-bubble', 'model');
+          const span = document.createElement('span');
+          span.classList.add('typewriter');
+          span.textContent = "";
+          modelBubble.dataset.fullText = "";
+          modelBubble.appendChild(span);
+          chat.appendChild(modelBubble);
+          chat.scrollTop = chat.scrollHeight;
+          // 建立 WebSocket 连接获取当前问题的回复
+          const wsUrl = `ws://${window.location.host}/ws/${providerId}/${qIndex}`;
+          const socket = new WebSocket(wsUrl);
+          socket.onopen = function() {
+              console.log("WebSocket connected:", wsUrl);
+          };
+          socket.onmessage = function(event) {
+              try {
+                  const data = JSON.parse(event.data);
+                  if (data.error) {
+                      showError(chat, data.error.message);
+                      markQuestionError(providerId, qIndex);
+                      socket.close();
+                      // 错误后自动跳到下一题
+                      startProviderConversation(providerId, qIndex + 1);
+                      return;
+                  }
+                  if (data.choices && data.choices[0]) {
+                      const delta = data.choices[0].delta;
+                      if (delta.content) {
+                          updateModelBubble(span, delta.content);
+                      }
+                      if (data.choices[0].finish_reason) {
+                          markQuestionComplete(providerId, qIndex);
+                          socket.close();
+                          // 当前厂商完成当前题后启动下一题
+                          startProviderConversation(providerId, qIndex + 1);
+                      }
+                  }
+              } catch (err) {
+                  console.error("WebSocket JSON parse error:", err);
+              }
+          };
+          socket.onerror = function(event) {
+              console.error("WebSocket error:", event);
+              socket.close();
+          };
+      }
+
+      // 添加对话气泡（用户问题）
+      function appendChatBubble(container, text, type) {
+          const bubble = document.createElement('div');
+          bubble.classList.add('chat-bubble', type);
+          const span = document.createElement('span');
+          span.classList.add('typewriter');
+          span.textContent = text;
+          bubble.appendChild(span);
+          container.appendChild(bubble);
+          container.scrollTop = container.scrollHeight;
+      }
+
+      // 模型回复更新：打字机效果，自动滚动到底部
+      async function updateModelBubble(span, newChunk) {
+          let currentText = span.dataset.fullText || "";
+          const updatedText = currentText + newChunk;
+          span.dataset.fullText = updatedText;
+          let i = currentText.length;
+          while (i < updatedText.length) {
+              span.textContent = updatedText.substring(0, i + 1);
+              i++;
+              const chatContainer = span.parentElement.parentElement;
+              chatContainer.scrollTop = chatContainer.scrollHeight;
+              await new Promise(resolve => setTimeout(resolve, 30));
+          }
+      }
+
+      // 标记完成状态（绿色圆圈）
+      function markQuestionComplete(providerId, qIndex) {
+          const dot = document.getElementById(`${providerId}-dot-${qIndex}`);
+          dot.classList.add('completed');
+      }
+
+      // 新增：标记错误状态（红色圆圈）
+      function markQuestionError(providerId, qIndex) {
+          const dot = document.getElementById(`${providerId}-dot-${qIndex}`);
+          dot.classList.remove('completed');
+          dot.classList.add('error');
+      }
+
+      function showError(container, message) {
+          const errorDiv = document.createElement('div');
+          errorDiv.style.color = 'red';
+          errorDiv.textContent = `Error: ${message}`;
+          container.appendChild(errorDiv);
+      }
+
+      // 最终排名展示函数（测试结束后调用）
+      function showFinalRanking() {
+          fetch('/final_ranking')
+              .then(res => res.json())
+              .then(data => {
+                  updateRankingTable(data.rankings);
+                  document.getElementById('rankingModal').style.display = 'block';
+              })
+              .catch(err => console.error('获取最终排名失败:', err));
+      }
+
+function updateRankingTable(rankings) {
+    const tbody = document.getElementById('rankingBody');
+    tbody.innerHTML = rankings.map(r => {
+      return `<tr>
+        <td>${r.provider}</td>
+        <td>${r.firstToken ? (r.firstToken * 1000).toFixed(2) : '-'}</td>
+        <td>${r.avgTokensPerSecond}</td>
+        <td>${r.totalTime.toFixed(2)}</td>
+        <td>${r.totalTokens}</td>  <!-- 改这里 -->
+        <td>${r.answeredCount}</td>
+      </tr>`;
+    }).join('');
+}
+
+
+      function closeRanking() {
+          document.getElementById('rankingModal').style.display = 'none';
+      }
+
+      window.onload = initDashboard;
+  </script>
+
+</body>
+</html>
